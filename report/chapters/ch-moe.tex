@@ -1,0 +1,198 @@
+% Extracted from p02-moe-routing
+\subsection{Mixture-of-Experts Routing at Sub-100M Scale}
+\label{ch-moe}
+
+\paragraph{Background}
+
+\paragraph{Top-$k$ routing.} For token representation $x$, a router
+computes logits $g = W_r x \in \mathbb{R}^E$ and probabilities
+$p = \mathrm{softmax}(g)$. With top-$k$ routing, the token is
+dispatched to the $k$ experts with largest $p_i$, weighted by their
+(renormalised) probabilities. The Switch Transformer
+\citep{fedus2022switch} popularised $k=1$ with a load-balancing
+auxiliary loss; we keep $k$ general and specialise where needed.
+
+\paragraph{The auxiliary loss.} Let $f_i$ be the fraction of tokens in
+a batch dispatched to expert $i$ and $P_i$ the mean routing probability
+assigned to expert $i$. The Switch load-balancing loss is
+\begin{equation}
+  \mathcal{L}_{\mathrm{aux}} = \alpha \, E \sum_{i=1}^{E} f_i P_i ,
+  \label{eq:aux}
+\end{equation}
+with coefficient $\alpha > 0$. We derive its behaviour in
+Section~\ref{sec:aux}.
+
+\paragraph{Routing as estimation: the small-batch problem}
+\label{sec:tokens}
+
+The router is a classifier whose ``labels'' are implicit: a token
+should go to the expert that will process it best. Its gradient at
+each step is estimated from the tokens routed to each expert. With
+$N$ tokens per optimisation step and $E$ experts under top-1 routing,
+token counts follow a multinomial distribution, so for expert $i$ with
+routing share $q_i$,
+\begin{equation}
+  \mathbb{E}[n_i] = N q_i, \qquad
+  \mathrm{Var}(n_i) = N q_i (1 - q_i).
+\end{equation}
+Under uniform routing ($q_i = 1/E$), the relative standard deviation
+of expert $i$'s token count is
+\begin{equation}
+  \frac{\sqrt{\mathrm{Var}(n_i)}}{\mathbb{E}[n_i]}
+  = \sqrt{\frac{E - 1}{N}} \approx \frac{1}{\sqrt{N/E}}.
+\end{equation}
+The router's gradient for expert $i$'s parameters is an average over
+$n_i$ tokens; its noise therefore scales roughly as $1/\sqrt{N/E}$
+(the approximation is coarse at $E=8$, off by about 6\%). The
+quantity $N/E$---tokens per expert per step---is the router's
+effective sample size.
+
+For our 44M configuration, $N \approx 120{,}004{,}608 / 4{,}850
+\approx 2.47 \times 10^4$ tokens per step and $E = 8$, giving
+$N/E \approx 3{,}090$ tokens per expert per step under uniform
+routing, with relative fluctuation around $1.8\%$. That is
+comfortable \emph{at the step level}. But two caveats bite at small
+scale. First, if gradient accumulation is used, the per-microbatch
+$N$ can be an order of magnitude smaller, pushing relative
+fluctuations past $10\%$. Second, and more fundamentally, small
+models train on far fewer tokens in total---120M here against the
+trillions of large runs---so the router gets far fewer updates over
+training to average out the noise or to recover from an early
+bad lock-in. The router is thus solving a bandit problem with few
+pulls per arm per round and few rounds overall: the classic
+conditions for premature exploitation.
+
+\paragraph{The rich-get-richer map}
+\label{sec:feedback}
+
+Beyond noise, there is a deterministic feedback. Let
+$f^{(t)} \in \Delta^{E-1}$ be the routed fractions at step $t$ and
+$\ell^{(t)}$ the corresponding mean router logits, with
+$f^{(t)} = \mathrm{softmax}(\ell^{(t)})$. Expert $i$'s parameters move
+in proportion to the tokens it sees, so to first order its logit
+grows in proportion to its routed fraction:
+\begin{equation}
+  \ell^{(t+1)} = \ell^{(t)} + \alpha f^{(t)}, \qquad \alpha > 0,
+\end{equation}
+where $\alpha$ absorbs the learning rate, the tokens per step, and
+the mean per-token gradient alignment. The uniform point
+$\ell = c\mathbf{1}$ ($f_i = 1/E$) is a fixed point. Linearising
+around it in the zero-sum gauge ($\sum_i \epsilon_i = 0$),
+\begin{equation}
+  f_i \approx \frac{1}{E} + \frac{\epsilon_i}{E}, \qquad
+  \epsilon' = \frac{\alpha}{E}\,\epsilon .
+\end{equation}
+Perturbations therefore grow geometrically whenever
+\begin{equation}
+  \alpha > E .
+  \label{eq:instability}
+\end{equation}
+Since $\alpha = \eta N \bar{g}$ (learning rate $\times$ tokens per
+step $\times$ mean per-token logit gradient), condition
+\eqref{eq:instability} is easier to satisfy when per-token gradients
+are large and coherent---precisely the early-training regime where
+some experts randomly fit the data better than others. The map is
+deliberately simple, but it isolates the mechanism: routing
+concentration is \emph{self-amplifying}, and the uniform distribution
+is an unstable equilibrium once feedback exceeds the threshold.
+Noise (Section~\ref{sec:tokens}) decides \emph{which} experts win;
+the feedback decides that \emph{someone} wins everything.
+
+\paragraph{The load-balancing loss, derived}
+\label{sec:aux}
+
+The auxiliary loss \eqref{eq:aux} penalises the correlation between
+dispatched fractions $f_i$ and mean probabilities $P_i$. In the
+idealised case $f_i = P_i$,
+\begin{equation}
+  \sum_{i=1}^E f_i P_i = \sum_{i=1}^E f_i^2 \geq \frac{1}{E},
+\end{equation}
+by convexity, with equality iff routing is uniform. The factor $E$
+normalises the minimum to 1, so $\mathcal{L}_{\mathrm{aux}} \geq
+\alpha$ with equality at perfect balance. The loss is minimised by
+spreading tokens evenly---but note it does not distinguish
+\emph{which} tokens go where, only the marginal distribution. It is
+a regulariser on the router's marginals, not a teaching signal for
+routing quality.
+
+\paragraph{Choosing $\alpha$.} The auxiliary term contributes
+$O(\alpha)$ per token to the total loss. If $\alpha$ is too large,
+the router optimises balance at the expense of the language-modelling
+objective (uniform routing with random experts); if too small, the
+feedback of Section~\ref{sec:feedback} dominates. A practical,
+scale-free heuristic: choose $\alpha$ so that
+$\mathcal{L}_{\mathrm{aux}}$ is roughly $1$--$10\%$ of the LM loss at
+initialisation, then verify the diagnostics of
+Section~\ref{sec:diagnostics} rather than tuning blindly. The Switch
+Transformer's $\alpha = 0.01$ \citep{fedus2022switch} sits in this
+range for typical setups, but the right value moves with $E$ and
+batch size, so it should be re-derived per configuration, not copied.
+
+\paragraph{Capacity, dropping, and utilisation}
+\label{sec:capacity}
+
+In practice each expert accepts at most
+$C = \gamma \cdot kN/E$ tokens per batch ($\gamma \geq 1$ the
+capacity factor); overflow tokens are dropped (passed through
+unprocessed). Define utilisation $U_i = \min(1, n_i / C)$.
+Dropping interacts badly with collapse: once an expert is
+under-utilised, its effective batch shrinks further, its gradients
+get noisier, and recovery becomes less likely. A capacity factor
+$\gamma$ moderately above 1 absorbs the multinomial fluctuation
+derived in Section~\ref{sec:tokens} without masking systematic
+imbalance---dropping should be rare under healthy routing and common
+only under collapse, which makes the drop rate itself a diagnostic.
+
+\paragraph{Proposed diagnostics}
+\label{sec:diagnostics}
+
+We propose logging, per MoE layer and per evaluation window:
+
+\begin{enumerate}
+  \item \textbf{Routing entropy.}
+    $H = -\sum_i \bar{q}_i \log \bar{q}_i$ over corpus-level routing
+    shares $\bar{q}_i$, normalised by $\log E$. Healthy: near 1.
+    Collapsing: trending toward 0.
+  \item \textbf{Gini coefficient} of per-expert token counts.
+    A single number in $[0,1]$; 0 is perfect balance.
+  \item \textbf{Dead-expert fraction:} share of experts with
+    $\bar{q}_i$ below $1/(10E)$ over the window. Nonzero is an alarm.
+  \item \textbf{Drop rate:} fraction of tokens dropped by capacity
+    limits. Spikes indicate the imbalance has become structural.
+\end{enumerate}
+The point of these metrics is early warning: by the time validation
+loss reflects collapse, the router has usually locked in and the
+starved experts cannot recover within a small model's token budget.
+
+\paragraph{Discussion}
+
+Applied to our setting---$E=8$ experts, $\approx 2.5 \times 10^4$
+tokens per step, 120M training tokens on TinyStories---the analysis
+suggests the risk is real but manageable: step-level token counts
+per expert are adequate, while microbatch-level noise and the short
+total training horizon are the threats. The prescriptions are
+unglamorous: keep $\alpha$ honest via the initialisation heuristic,
+log the four diagnostics from the first step, and treat any nonzero
+dead-expert fraction as a stop-and-fix event rather than a curiosity.
+Jitter on router logits (as in Switch) and a router-specific lower
+learning rate are compatible additions, but they treat symptoms;
+the diagnostics treat the disease by making it visible.
+
+\paragraph{Limitations}
+
+This paper is entirely analytical: we report no new experiments, and
+the dynamical map of Section~\ref{sec:feedback} is illustrative, not
+a fitted model of any real router. We assume top-$k$ routing with
+$k$ small; expert-choice routing and learned temperature schedules
+are out of scope. TinyStories is a simple distribution; routing
+behaviour on more diverse corpora may differ quantitatively.
+
+\paragraph{Conclusion}
+
+Small MoE models are not small versions of large MoE models where
+routing is concerned. The router learns from $N/E$ tokens per step,
+and at sub-100M scale that number, together with short training
+horizons, makes expert collapse a first-order risk rather than a
+curiosity. The instability condition $\alpha > E$, the auxiliary
+loss, and the four diagnostics give practitioners a complete,
+cheap toolkit: understand the feedback, regularise it, and watch it.
