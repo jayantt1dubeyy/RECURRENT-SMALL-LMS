@@ -1,0 +1,156 @@
+% Extracted from p09-mechanistic-loops
+\subsection{What Do Extra Loops Compute?}
+\label{ch-mech}
+
+\paragraph{Introduction}
+
+The loop sweep is the most informative cheap experiment you can run on
+a recurrent language model. For our 44M-parameter OpenMythos model
+(43,974,722 parameters; dim 512; 6 prelude + 2 coda layers; 4 loops;
+8 experts; GQA; trained on TinyStories for 120M tokens, loss
+9.5242$\rightarrow$1.5263), the sweep over 256 held-out sequences
+gives (full results in Section~\ref{sec:loopsweep}, Table~\ref{tab:sweep}):
+
+Two facts stand out. First, the gains are enormous and concentrated:
+one extra loop (1$\rightarrow$2) more than halves perplexity; the
+trained depth reaches 4.41. The iterations are doing substantial,
+non-redundant work. Second, the dynamics saturate hard: doubling past
+the trained depth slightly hurts, then nothing changes at all through
+16 loops---yet generations stay grammatical and coherent throughout,
+so this is not collapse, it is convergence.
+
+The natural next question---\emph{what is each loop computing?}---has
+barely been asked for recurrent language models. Feedforward
+interpretability has tools for this: induction heads
+\citep{elhage2021mathematical} localise in-context learning to
+specific heads; the Universal Transformer literature
+\citep{dehghani2019universal} speculated about iterative refinement
+but rarely measured it per-iteration. We propose to turn the probe
+toolkit onto the loop dimension itself.
+
+\paragraph{Hypotheses}
+
+We state three testable hypotheses, each tied to the observed sweep.
+
+\paragraph{H1: Coarse-to-fine refinement.} Early loops resolve local
+choices (lexicon, agreement, short-range syntax); later loops handle
+long-range coherence (entity consistency, discourse structure). Under
+H1, the 29.38$\rightarrow$11.18 drop (loop 1$\rightarrow$2) should be
+dominated by local-likelihood improvements, while the
+11.18$\rightarrow$4.41 drop (loop 2$\rightarrow$4) should show gains
+concentrated on tokens whose predictability depends on distant
+context. This is testable by stratifying per-token loss improvements
+by dependency length---a measurement, not a speculation.
+
+\paragraph{H2: Fixed-point convergence.} Beyond the trained depth, the
+recurrent block converges to an approximate fixed point:
+$h_{k} \approx h_{k-1}$ for $k > 4$, which explains both the plateau
+(4.90$\rightarrow$4.91$\rightarrow$4.91) and the preserved coherence
+(the fixed point is a sensible representation, just not a better
+one). Under H2, representation similarity between consecutive loops
+should approach 1.0 for $k \geq 8$ while remaining well below 1.0 for
+$k \leq 4$.
+
+\paragraph{H3: Progressive circuit formation.} Attention circuits that
+implement in-context behaviours---induction heads in the sense of
+\citet{elhage2021mathematical}---form progressively across loops
+rather than appearing fully formed. Under H3, induction-head scores
+(prefix-matching behaviour in attention patterns) should rise
+monotonically over loops 1--4 and then stabilise, mirroring the
+perplexity curve.
+
+Note the tension H1 and H2 jointly create, which is exactly what makes
+this interesting: the same block must implement \emph{changing}
+computation early (refinement) and \emph{stationary} computation late
+(convergence). Characterising the transition is the core empirical
+target.
+
+\paragraph{Proposed Probe Protocol}
+
+All experiments below are proposed. The model, data (256 held-out
+TinyStories sequences of length 256), and loop settings
+$\{1,2,4,8,12,16\}$ are fixed from the companion study; only the
+measurements are new.
+
+\paragraph{P1: Per-loop representation similarity.} For each sequence,
+record the recurrent block's output $h_k$ at each loop $k$. Compute
+centred kernel alignment (CKA) and mean cosine similarity between
+$(h_k, h_{k+1})$ for $k = 1 \ldots 15$ at fixed total depth 16.
+\emph{Predicted:} similarity well below 1.0 for $k < 4$, rising
+sharply, and $\approx$1.0 for $k \geq 8$ (H2). A control---similarity
+between $h_k$ at matched loop index across different total depths
+(e.g.\ loop 2 of a 4-loop run vs loop 2 of a 16-loop run)---tests
+whether loop-indexed computation is depth-invariant.
+
+\paragraph{P2: Attention-pattern evolution.} For each loop, compute
+induction-head scores per head following \citet{elhage2021mathematical}
+(attention paid to the token following a previous occurrence of the
+current token). Track the distribution of scores across loops.
+\emph{Predicted:} median induction score rises over loops 1--4 and
+flattens thereafter (H3); heads that score highly should also show
+the largest cross-loop attention-map change early and the smallest
+late.
+
+\paragraph{P3: Per-loop early-exit classifiers.} Freeze the model;
+train a linear probe on each $h_k$ to predict the next token, and
+record probe perplexity per loop. Additionally, train probes for
+auxiliary targets: part-of-speech of the next token (local syntax)
+and the identity of the story's protagonist (global coherence).
+\emph{Predicted:} next-token probe perplexity tracks the observed
+29.38$\rightarrow$4.41 curve; the syntax probe saturates by loop 2
+while the protagonist probe keeps improving to loop 4 (H1).
+
+\paragraph{P4: Loop interventions.} At fixed total depth 16: (a) skip
+loop $k$ (replace $h_k$ with $h_{k-1}$) for each $k$ and measure the
+perplexity delta---this prices each iteration's marginal contribution;
+(b) freeze attention to its loop-4 pattern for all $k > 4$ and test
+whether the 4.90 plateau persists, distinguishing representational
+from attentional convergence.
+
+\paragraph{What Would Change Our Minds}
+
+The protocol is designed to be falsifiable. If P1 shows high
+similarity even between loops 1 and 2, H2's convergence story is
+wrong and something else---perhaps the coda, not the recurrent
+block---explains the gains. If P3's probes are flat across loops
+while output perplexity still drops 29.38$\rightarrow$4.41, the
+refinement is happening outside the probed representations (prelude
+or coda), which would redirect the investigation. If induction scores
+(P2) are already maximal at loop 1, then in-context circuitry is
+established immediately and later loops do something orthogonal to
+the induction-head picture. Each outcome narrows the hypothesis
+space; that is the point.
+
+\paragraph{Discussion}
+
+Why does this matter beyond one 44M model? If recurrent refinement
+is real and characterisable---if we can say ``loop 2 fixes syntax,
+loop 4 fixes discourse''---then loop count becomes an
+\emph{interpretable} compute knob rather than a blind
+hyperparameter. It would also inform distillation into recurrent
+students (companion paper on loop-aware distillation, this series):
+per-loop supervision targets should match what each loop is actually
+for. Conversely, if the probes show the block converging to a fixed
+point with no structured per-loop division of labour, that reframes
+recurrence as learned depth with shared parameters---valuable, but
+not ``refinement'' in any mechanistic sense, and the test-time
+extrapolation story needs rethinking.
+
+\paragraph{Limitations}
+
+This paper proposes; it does not report. The hypotheses are grounded
+in one model's behavioural signature on one dataset (TinyStories),
+and synthetic children's stories may not exercise the circuitry
+(e.g.\ induction heads) that matters at scale. Probes are
+correlational: rising probe accuracy does not prove the model
+\emph{uses} the probed information. The companion behavioural numbers
+are real; everything about mechanism here is conjecture awaiting the
+protocol.
+
+\paragraph{Conclusion}
+
+Perplexity 29.38 $\rightarrow$ 4.41 $\rightarrow$ 4.91 across loops is
+a behavioural fact in search of a mechanistic explanation. We have
+posed the explanation as three falsifiable hypotheses and specified
+the four-probe protocol that would test them. The loops are doing
+something; it is time to look at what.
