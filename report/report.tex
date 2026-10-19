@@ -1,0 +1,89 @@
+\documentclass[11pt,twocolumn]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{mathptmx}           % Times-like, NeurIPS look
+\usepackage[margin=0.9in,top=0.85in,bottom=0.9in,columnsep=0.25in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{natbib}
+\hypersetup{colorlinks=true,linkcolor=blue,citecolor=blue,urlcolor=blue}
+\setlength{\parskip}{0.45em}
+\setlength{\parindent}{1em}
+\emergencystretch=1.5em
+
+% NeurIPS-style abstract
+\renewenvironment{abstract}{%
+  \centerline{\large\bfseries Abstract}%
+  \vspace{0.5ex}%
+  \begin{quote}\small
+}{%
+  \end{quote}\vspace{1.5ex}%
+}
+
+\title{Recurrent Small Language Models:\\Architecture, Training, and Evaluation}
+\author{Jayant Dubey}
+\date{October 2026}
+
+\begin{document}
+\twocolumn[
+\begin{@twocolumnfalse}
+\maketitle
+\begin{abstract}
+This report consolidates a ten-part research programme on small,
+recurrent language models into a single volume. The empirical
+centerpiece is a loop-depth extrapolation study on a 44M-parameter
+recurrent mixture-of-experts transformer trained on TinyStories: test-time
+gains saturate at the trained loop depth and slightly degrade beyond it.
+Around this result, the report develops the
+architecture analysis (sparse routing, grouped-query attention,
+depth--width tradeoffs), training methodology (curriculum design,
+loop-aware distillation), and evaluation and deployment concerns
+(test-time compute taxonomy, quantization, mechanistic probes, and a
+benchmark proposal) for sub-billion-parameter recurrent models. Proposed
+experiments are labelled as such throughout; the only executed study is
+the loop sweep of Section~3.
+\end{abstract}
+\bigskip
+\end{@twocolumnfalse}
+]
+
+\section{Introduction}
+\label{sec:intro}
+\input{chapters/ch-intro.tex}
+
+\section{Reference Model and Training Setup}
+\label{sec:setup}
+\input{chapters/ch-background.tex}
+
+\section{Test-Time Loop Extrapolation: An Empirical Study}
+\label{sec:loop}
+\input{chapters/ch-loop.tex}
+
+\section{Architecture Analysis}
+\label{sec:arch}\label{ch:arch}
+\input{chapters/ch-moe.tex}
+\input{chapters/ch-gqa.tex}
+\input{chapters/ch-depthwidth.tex}
+
+\section{Training Methodology}
+\label{sec:train}
+\input{chapters/ch-curriculum.tex}
+\input{chapters/ch-distill.tex}
+
+\section{Evaluation and Deployment}
+\label{sec:eval}
+\input{chapters/ch-taxonomy.tex}
+\input{chapters/ch-quant.tex}
+\input{chapters/ch-mech.tex}
+\input{chapters/ch-bench.tex}
+
+\section{Conclusion}
+\label{sec:conclusion}
+\input{chapters/ch-conclusion.tex}
+
+\section*{References}
+\input{chapters/unified-bib.tex}
+
+\end{document}
