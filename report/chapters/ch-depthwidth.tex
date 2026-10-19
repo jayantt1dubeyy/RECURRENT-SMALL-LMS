@@ -1,0 +1,147 @@
+% Extracted from p04-depth-width
+\subsection{Depth--Width Tradeoffs in Looped Architectures}
+\label{ch-depthwidth}
+
+\paragraph{Background}
+
+The Universal Transformer \citep{dehghani2019universal} replaced
+fixed depth with recurrent iteration of a shared block. ALBERT
+\citep{lan2020albert} showed cross-layer parameter sharing
+preserves quality while shrinking models. The OpenMythos family
+\citep{gomez2024openmythos} combines recurrence with sparse
+experts in a prelude/loop/coda structure. Test-time loop
+extrapolation---running extra loops at inference---is the natural
+test-time scaling axis for such architectures, though
+recent small-scale evidence finds gains saturating at the
+training loop count (Section~\ref{sec:loopsweep}).
+
+\paragraph{The budget equations}
+\label{sec:budget}
+
+Let $L_u$ be the number of unique non-looped layers (prelude $+$
+coda), $L_b$ the unique layers in the looped block, $R$ the loop
+count, $d$ the width, and $p \approx 12d^2$ the parameters per
+dense layer (attention $4d^2$ plus feed-forward $8d^2$; MoE
+multiplies the feed-forward term by the expert count). Splitting
+off fixed costs (embeddings, output head, norms) as $P_0$,
+\begin{equation}
+  P = P_0 + (L_u + L_b)\,p, \qquad
+  D_{\mathrm{eff}} = L_u + R\,L_b,
+  \label{eq:budget}
+\end{equation}
+where $D_{\mathrm{eff}}$ is the \emph{effective} (unrolled) depth:
+the number of layer evaluations per forward pass. Eliminating
+$L_b$,
+\begin{equation}
+  D_{\mathrm{eff}} = R\,\frac{P - P_0}{p} - (R - 1)\,L_u .
+  \label{eq:deff}
+\end{equation}
+Two readings of \eqref{eq:deff}: at fixed $R$, effective depth
+grows with the parameter budget as usual; at fixed $P$,
+effective depth grows \emph{linearly in $R$}. Loops manufacture
+depth out of thin parameter air.
+
+The catch is compute. Forward FLOPs per token scale as
+$2\,p\,D_{\mathrm{eff}}$ (plus small terms), and training as
+roughly $6\,p\,D_{\mathrm{eff}}$. A dense model with $P$
+parameters spends $\approx 6P$ FLOPs per token; a looped model
+with the same $P$ spends $6\,p\,D_{\mathrm{eff}} > 6P$, because
+shared parameters are reused. \emph{Loops do not save compute;
+they convert compute into depth at fixed parameter count.} Any
+Chinchilla-style compute-optimality analysis must be re-derived
+for looped models, since parameters and FLOPs no longer move
+together.
+
+\paragraph{The conditioning constraint}
+\label{sec:conditioning}
+
+Depth bought with loops has a price beyond FLOPs: gradient flow.
+Backpropagation through $R$ repetitions of the loop block
+multiplies by its Jacobian $J$ at each pass, so gradient norms
+scale roughly as $\rho^R$, where $\rho$ is the spectral radius of
+$J$. If $\rho > 1$, gradients explode with $R$; if $\rho < 1$
+they vanish and the later loops learn nothing. Stable, useful
+looping requires $\rho \approx 1$---the block must act as a
+near-isometry that still does computational work each iteration.
+
+This yields a structural argument for \emph{small} loop blocks. A
+one- or two-layer operator is a tighter dynamical system: fewer
+interacting nonlinearities, easier to keep near-isometric, and a
+cleaner fixed-point-iteration semantics (refine the
+representation, don't rebuild it). A deep looped block must
+simultaneously learn a complex transformation \emph{and} keep its
+$R$-fold composition well-conditioned---a harder joint problem.
+Hence our first hypothesis:
+
+\paragraph{Hypothesis H1.} At fixed $P$ and fixed training
+compute, configurations with small $L_b$ and moderate $R$
+outperform large $L_b$ with $R = 1$, because the conditioning
+constraint binds before the expressivity constraint.
+
+The prelude and coda play different roles from the loop block:
+the prelude maps tokens into the latent space the loop refines,
+and the coda maps back to logits. Neither is iterated, so
+neither faces the $\rho^R$ constraint, but starving them
+bottlenecks everything the loops can do. Hence:
+
+\paragraph{Hypothesis H2.} There is a minimal viable $L_u$ (we
+conjecture 4--8 layers at $d = 512$ scale); below it, loop-count
+increases cannot compensate, because the prelude/coda mappings
+themselves lack capacity.
+
+\paragraph{Width, loops, and the compute knob}
+\label{sec:width}
+
+With $L_u$ floored by H2 and $L_b$ kept small by H1, the remaining
+budget goes to width $d$ and loop count $R$. Width buys
+representational capacity per step; loops buy sequential
+refinement steps. They are not interchangeable: width helps
+single-pass pattern matching, loops help iterative computation.
+This suggests treating $R$ not as an architectural constant but
+as a \emph{compute knob} akin to test-time compute
+\citep{snell2024scaling}:
+
+\paragraph{Hypothesis H3.} The optimal $R$ scales with task
+difficulty (reasoning depth required), not with model size. A
+model trained with randomised loop counts should therefore
+extrapolate to $R$ beyond its mean training value, whereas
+fixed-$R$ training calibrates the dynamics to exactly $R$---which
+is consistent with loop-sweep measurements showing perplexity
+saturating precisely at the training loop count (29.38 at 1 loop
+$\to$ 4.41 at 4 loops, then flat) on our 44M model.
+
+H3 reframes the negative extrapolation result as expected
+behaviour rather than a failure: fixed-$R$ training teaches the
+block a 4-step operator, and there is no reason a 4-step operator
+iterated 8 times should improve.
+
+\paragraph{Proposed experiments}
+
+We propose, but do not run: (E1) a fixed-$P$, fixed-compute sweep
+over $(L_u, L_b, R)$ on TinyStories \citep{eldan2023tinystories},
+measuring validation loss, to test H1/H2 directly; (E2)
+tracking the spectral radius $\rho$ of the loop-block Jacobian
+through training, testing whether stable runs indeed hold
+$\rho \approx 1$ and whether instability predicts divergence;
+(E3) training with $R$ sampled per batch and sweeping $R$ at
+evaluation, testing H3's extrapolation claim.
+
+\paragraph{Limitations}
+
+Entirely theoretical: no training runs are reported and the
+hypotheses are untested. The $\rho^R$ argument treats the loop
+block Jacobian as fixed, ignoring its evolution during training
+and input dependence. TinyStories exercises limited reasoning
+depth, so H3's difficulty-scaling claim needs harder benchmarks
+to bite.
+
+\paragraph{Conclusion}
+
+Parameter sharing splits the depth question in two: unique
+layers, bounded by the budget equation \eqref{eq:budget}, and
+effective depth, purchasable with loops at the price of compute
+and conditioning. The analysis points to small loop blocks, a
+minimal but non-trivial prelude/coda, width for capacity, and
+loop count as a difficulty-matched compute knob. Whether the
+hypotheses survive contact with experiment is now an empirical
+question---the equations say exactly which experiments to run.
