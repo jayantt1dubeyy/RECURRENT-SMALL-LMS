@@ -1,0 +1,186 @@
+% Extracted from p06-testtime-scaling
+\subsection{A Taxonomy of Test-Time Compute}
+\label{ch-taxonomy}
+
+\paragraph{Background}
+
+\paragraph{Test-time scaling at large scale}
+
+\citet{snell2024scaling} study how to spend a fixed inference FLOPs
+budget across strategies: repeated sampling with majority vote or
+best-of-$N$ selection, and sequential revision guided by verifiers. Two
+findings matter here. First, for easier questions, parallel strategies
+(best-of-$N$, self-consistency) are compute-optimal: independent samples
+explore the answer space cheaply. Second, for harder questions,
+sequential strategies win: iterative revision steered by a verifier
+outperforms parallel sampling per FLOP. The crossover depends on task
+difficulty and verifier quality. Both findings assume verifiers worth
+having---a safe assumption at 8B, a loaded one at 44M.
+
+\paragraph{Sampling-based methods}
+
+Best-of-$N$ draws $N$ independent completions and keeps the best
+according to a scorer. Self-consistency \citep{wang2023selfconsistency}
+draws $N$ reasoning paths and takes the majority answer, needing no
+learned scorer at all. Both multiply inference cost by $N$ (modulo
+batching) and both live or die by selection: best-of-$N$ needs a
+verifier better than chance; self-consistency needs the model's modal
+answer to be the right one, which holds for reasoning tasks and fails
+for open-ended generation.
+
+\paragraph{Verifier-based methods}
+
+Outcome verifiers score final answers; process verifiers score
+intermediate steps \citep{cobbe2021verifiers}. They enable search
+(beam search, MCTS, revision loops) and reranking. The large-scale
+literature treats the verifier as a sunk cost---train once, reuse
+forever. At small scale the verifier is a second model to train, store,
+and serve, and its quality is bounded by the same data and capacity
+constraints as the policy it judges.
+
+\paragraph{Recurrent depth}
+
+Recurrent transformers iterate a shared block for a fixed number of
+loops during training \citep{dehghani2019universal}. Architectures in
+this family, including OpenMythos \citep{gomez2024openmythos}, invite an
+obvious test-time trick: run \emph{more} loops at inference than were
+used in training. Unlike sampling, this costs no extra parameters and
+no verifier. Whether the recurrent dynamics actually improve with extra
+iterations is an empirical question, which Section~\ref{sec:loopsweep} answers for one
+concrete model.
+
+\paragraph{A three-axis taxonomy}
+
+We classify test-time methods along three axes, each with a cost model
+in units of base-model forward passes per token, $F$.
+
+\paragraph{Axis I: sampling.} Best-of-$N$, self-consistency, majority
+vote. Cost $\approx N \cdot F$, reducible by batching but not
+asymptotically. Requires a selection mechanism: a verifier (Axis III) or
+a majority signal. Failure mode: when the verifier is weak, best-of-$N$
+selects confidently wrong answers---it amplifies verifier error, not
+just policy error.
+
+\paragraph{Axis II: depth.} Extra recurrent loops, adaptive computation
+time, early-exit inversion (running \emph{past} the trained depth).
+Cost $\approx L \cdot F$ for $L$ loops. Requires nothing but the model
+itself. Failure mode: the dynamics may be calibrated to the training
+iteration count, in which case extra loops add compute without adding
+quality---or subtract it.
+
+\paragraph{Axis III: verification.} Learned outcome or process reward
+models, rerankers, revision critics. Cost $= V + N \cdot F$ where $V$ is
+the verifier's forward cost per candidate. This axis rarely stands
+alone; it is the steering wheel for Axes I and II. Failure mode: at
+small scale, $V$ is not negligible, and a weak verifier mis-steers.
+
+The axes compose: Snell's sequential revision is Axis II$\times$III;
+best-of-$N$ with a reward model is Axis I$\times$III. The taxonomy's
+point is to make the cost of each composition explicit before asking
+which compositions a 44M budget can afford.
+
+\paragraph{What changes below a billion parameters}
+
+\paragraph{The verifier overhead problem}
+
+Consider a learned verifier at half the policy's size---generous by
+large-scale standards, where verifiers are often far smaller
+relative to the policy. For an 8B policy, a 4B verifier is a 50\%
+serving overhead. For a 44M policy, a 22M verifier is also a 50\%
+overhead, but the absolute quality of a 22M verifier trained on the
+same limited data is far lower: verifier quality scales with capacity
+too, and there is no large-scale teacher to distil from cheaply. The
+relative cost is the same; the absolute quality is not. This breaks
+the large-scale assumption that verification is cheap and good.
+
+\paragraph{Sampling arithmetic}
+
+Best-of-8 on a 44M model spends $8 \times 44\text{M} = 352\text{M}$
+parameters' worth of forward compute per token---roughly the cost of a
+single greedy pass from a 350M model. The honest comparison is therefore
+not ``44M vs.\ 44M with best-of-8'' but ``best-of-8 from 44M vs.\
+greedy from 350M.'' If the 350M model wins that comparison, sampling is
+a worse use of the FLOPs than training a bigger model. Whether it does
+is task-dependent and, at small scale, largely unmeasured---which is
+itself the point: the large-scale literature rarely runs this
+comparison because at 70B the alternative (a 560B model) does not exist.
+
+Self-consistency escapes the verifier problem but keeps the sampling
+cost, and its majority-vote mechanism assumes the model's modal answer
+is correct. On TinyStories-style generation, where there is no single
+right answer, the mechanism has nothing to grip.
+
+\paragraph{Depth: measured, not assumed}
+
+Here we have direct evidence. Our 44M-parameter recurrent transformer
+(43,974,722 parameters; dim 512; 6 prelude $+$ 2 coda layers; 4 training
+loops; 8 experts; GQA; trained on TinyStories for 120M tokens, loss
+9.5242 $\rightarrow$ 1.5263) was evaluated with loop counts swept from 1
+to 16 over 256 held-out sequences (full results in
+Section~\ref{sec:loopsweep}, Table~\ref{tab:sweep}).
+
+Recurrence helps enormously up to the training depth---perplexity falls
+by a factor of 6.7 from 1 to 4 loops---and then the gains stop dead.
+Eight loops are slightly \emph{worse} than four; sixteen add nothing.
+Generations remain coherent at all depths, so this is not collapse; it
+is saturation. The recurrent dynamics are calibrated to the iteration
+count they were trained with. Test-time depth extrapolation, the
+cheapest axis in the taxonomy, is not free after all---at least not
+without training-time support such as randomised loop counts.
+
+\paragraph{The memory wall}
+
+A final small-scale constraint: test-time methods that hold $N$
+candidates or deep activation caches multiply memory, not just FLOPs.
+At 44M the weights fit comfortably anywhere, which tempts wasteful
+inference schemes; but the deployment targets for small models are
+phones and browsers, where memory bandwidth---not capacity---is the
+bottleneck, and $N$-way sampling spends it $N$ times over.
+
+\paragraph{Position: three bets for small-scale test-time compute}
+
+\begin{enumerate}
+\item \textbf{Bet on trained-depth recurrence, not extrapolated depth.}
+Running the loops you trained is pure win (our 1$\rightarrow$4 loop
+result); running more is wishful thinking without training-time
+support. Research should target \emph{adaptive} depth within the
+trained range---early exit for easy tokens---rather than extrapolation
+beyond it.
+
+\item \textbf{Bet on cheap, honest verifiers.} Learned reward models are
+too expensive and too weak at this scale. Heuristic verifiers---length
+penalties, repetition detectors, grammar checkers, task-specific
+validators---cost near zero and fail transparently. A verifier you can
+read is better than a verifier you can only hope is calibrated.
+
+\item \textbf{Sample only with a trustworthy selector.} Best-of-$N$ is
+justified at small scale only when the selection signal is strong:
+exact-match verifiers for constrained tasks, or self-consistency on
+tasks with verifiable answers. Unverifiable open-ended generation
+should not be sampled---the selector cannot tell good from lucky.
+\end{enumerate}
+
+Open questions: can randomised training loop counts unlock genuine
+extrapolation? At what parameter count does a learned verifier become
+worth its serving cost? And does the Snell easy/hard crossover replicate
+when both policy and verifier are small?
+
+\paragraph{Limitations}
+
+This is a position paper; the taxonomy is argued, not experimentally
+validated as a whole. The depth-axis evidence is a single model on a
+single corpus---one careful data point, not a law. Snell's findings may
+transfer better than we argue, particularly the easy-question sampling
+results. We also ignore fine-tuning-time analogues (e.g., distilling
+test-time compute back into weights), which may be the most practical
+small-scale strategy of all.
+
+\paragraph{Conclusion}
+
+Test-time compute is real, but its economics are scale-dependent.
+Sampling multiplies cost against a fixed budget, learned verifiers cost
+a second model the budget cannot spare, and recurrent depth---the one
+free axis---saturates at the training depth. The small-scale research
+agenda should stop importing large-scale recipes and start designing
+test-time methods for the regime where the verifier must cost less than
+the model it serves.
