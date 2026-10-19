@@ -1,0 +1,142 @@
+% Extracted from p03-gqa-small
+\subsection{Grouped-Query Attention at Small Scale}
+\label{ch-gqa}
+
+\paragraph{Background}
+
+\paragraph{Attention variants.} With model width $d$, $h_q$ query
+heads and head dimension $d_h = d/h_q$: multi-head attention (MHA)
+uses $h_{kv} = h_q$ key/value heads; multi-query attention uses
+$h_{kv} = 1$; grouped-query attention \citep{ainslie2023gqa} uses
+$1 < h_{kv} < h_q$, with each KV head shared by $h_q/h_{kv}$ query
+heads. GQA was shown to match MHA quality closely while
+substantially beating single-head sharing on quality.
+
+\paragraph{Parameter arithmetic}
+\label{sec:params}
+
+Per attention layer, with biases ignored:
+\begin{equation}
+  P_{\mathrm{MHA}} = \underbrace{d^2}_{Q} + \underbrace{d^2}_{K}
+  + \underbrace{d^2}_{V} + \underbrace{d^2}_{O} = 4d^2.
+\end{equation}
+For GQA with $h_{kv}$ KV heads, the K and V projections map
+$d \to h_{kv} d_h$:
+\begin{equation}
+  P_{\mathrm{GQA}}(h_{kv}) = 2d^2 + 2\,d\,h_{kv}d_h
+  = 2d^2\left(1 + \frac{h_{kv}}{h_q}\right).
+\end{equation}
+With $d = 512$, $h_q = 8$, $d_h = 64$: MHA costs
+$4 \times 262{,}144 = 1{,}048{,}576$ parameters per layer. GQA with
+$h_{kv} = 2$ costs $524{,}288 + 131{,}072 = 655{,}360$ per layer, a
+saving of $393{,}216$ parameters per layer ($37.5\%$ of the
+attention sub-layer). Across the 8 unique attention layers of our
+reference model (6 prelude $+$ 2 coda), that is $\approx 3.15$M
+parameters, or about $7.2\%$ of the 43,974,722 total. A welcome
+discount, but not the reason to adopt GQA.
+
+\paragraph{KV-cache arithmetic}
+\label{sec:cache}
+
+The KV cache stores, per token per layer, one key and one value
+vector per KV head. In fp16:
+\begin{equation}
+  C_{\mathrm{tok,layer}}(h_{kv}) = 2 \cdot h_{kv} \cdot d_h
+  \cdot 2\ \mathrm{bytes}.
+\end{equation}
+For our dimensions: MHA ($h_{kv} = 8$) needs $2{,}048$ bytes per
+token per layer; GQA with $h_{kv} = 2$ needs $512$ bytes---a factor
+$h_q/h_{kv} = 4$ reduction, independent of model size. Total cache:
+\begin{equation}
+  C_{\mathrm{total}} = U \cdot C_{\mathrm{tok,layer}} \cdot T
+  \cdot B,
+\end{equation}
+where $U$ is the number of unrolled layers holding cache, $T$ the
+context length and $B$ the batch size. Note that in a looped
+architecture, each loop iteration produces its own KV entries, so
+$U$ counts unrolled depth (prelude $+$ loops $\times$ loop block
+$+$ coda), not unique layers.
+
+\paragraph{Worked serving scenarios}
+\label{sec:scenarios}
+
+Take $U = 12$ unrolled layers as an illustrative depth and fp16
+throughout. Model weights occupy $\approx 88$MB. All sizes below are
+decimal (1\,MB $= 10^6$ bytes).
+
+\begin{center}
+{\small\setlength{\tabcolsep}{4pt}
+\begin{tabular}{lrrrr}
+\toprule
+Scenario & $B$ & $T$ & MHA cache & GQA-2 cache \\
+\midrule
+Single chat & 1 & 512 & 12.6\,MB & 3.1\,MB \\
+Batched serving & 8 & 2{,}048 & 403\,MB & 101\,MB \\
+Heavy batch & 32 & 4{,}096 & 3.22\,GB & 0.81\,GB \\
+\bottomrule
+\end{tabular}}
+\end{center}
+
+The pattern is stark. For a single short conversation, the MHA
+cache (12.6\,MB) is a footnote next to 88\,MB of weights---GQA buys
+almost nothing. At batch 8 and 2k context, the MHA cache
+(403\,MB) is over $4\times$ the weights, and GQA reclaims some
+300\,MB. At heavy batching it is the difference between fitting on
+one modest GPU and not fitting at all.
+
+There is a second, throughput-shaped win: autoregressive decoding
+is memory-bandwidth bound, and each step streams the whole cache.
+GQA cuts bytes-per-step by $h_q/h_{kv}$, which translates directly
+into higher token throughput in cache-bound regimes---again, only
+where the cache is large enough to be the bottleneck.
+
+\paragraph{Why training barely notices}
+\label{sec:training}
+
+During training there is no KV cache; the K and V \emph{activations}
+are recomputed per forward pass. GQA shrinks them by $h_{kv}/h_q$,
+but K/V activations are a small slice of total activation memory,
+which is dominated by $O(BTd)$ terms (Q, O, FFN intermediates,
+residuals) that GQA does not touch. Expect low-single-digit percent
+training memory savings and no meaningful throughput change: GQA is
+a serving optimisation, full stop.
+
+\paragraph{Discussion: when GQA matters at small scale}
+
+The decision rule falls out of Section~\ref{sec:scenarios}:
+compute $C_{\mathrm{total}}$ for MHA in your serving regime; if it
+is comparable to or larger than the weight footprint, GQA (or even
+fewer KV heads) is worth it; if it is an order of magnitude
+smaller, it is cosmetic. Concretely for 44M--500M models:
+\begin{itemize}
+  \item \textbf{On-device / single-user chat:} negligible. Skip it
+    unless the parameter saving is wanted for its own sake.
+  \item \textbf{Batched inference servers, long context:}
+    decisive. The cache dominates and GQA's $4\times$ cut (at
+    $h_{kv} = 2$) directly buys batch size and context length.
+  \item \textbf{Speculative or parallel decoding:} any technique
+    that multiplies effective batch size pushes you into the
+    cache-dominated regime sooner.
+\end{itemize}
+The quality cost, per \citet{ainslie2023gqa}, is small at these
+grouping ratios, so the trade is nearly free where it matters and
+unnecessary where it does not.
+
+\paragraph{Limitations}
+
+All figures assume fp16 and the stated head geometry; int8/int4
+quantised caches scale all numbers down uniformly without changing
+the ratios. We analyse memory, not the engineering cost of
+implementing grouped attention kernels, which is real but
+one-off. Quality parity is taken from \citet{ainslie2023gqa}
+rather than re-measured here.
+
+\paragraph{Conclusion}
+
+GQA's value proposition does not fade at small scale---it
+\emph{relocates}. The parameter saving ($\sim$7\% at 44M) is a
+bonus; the KV-cache factor of $h_q/h_{kv}$ is the main event, and
+it matters exactly when serving memory is cache-bound: large
+batches, long contexts. For short-context single-user inference it
+is negligible, and for training it is nearly invisible. Size the
+cache for your regime, then decide.
