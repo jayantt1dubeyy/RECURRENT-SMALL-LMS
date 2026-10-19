@@ -1,0 +1,50 @@
+Small language models are having a moment. As the field's attention
+has concentrated on ever-larger systems, a parallel line of work asks
+what can be achieved under tight parameter budgets through
+\emph{architectural} rather than \emph{scale} innovation. Recurrent
+transformers---which iterate a shared block instead of stacking distinct
+layers---are among the most promising directions: they convert
+parameters into effective depth, offer a natural test-time compute knob
+in the loop count, and pair well with sparse mixture-of-experts layers.
+
+This report grew from a single training run and the questions it
+raised. In October 2026 the author trained a 44M-parameter recurrent
+transformer (OpenMythos architecture) on TinyStories and, after
+training, swept the loop count at evaluation time. The result---gains
+saturate at the trained depth and slightly degrade beyond it---is a clean negative finding
+with a sharp implication: test-time loop extrapolation is not free.
+The ten studies collected here work outward from that finding,
+covering the architecture that produced it, how such models should be
+trained, and how they should be evaluated and deployed.
+
+The report is organized as follows. Section~2 describes the reference
+model and training setup once, so that later chapters need not repeat
+it. Section~3 presents the empirical centerpiece, the loop-depth sweep.
+Section~4 analyses the architecture (routing, attention, and
+depth--width tradeoffs). Section~5 addresses training methodology
+(curriculum and distillation). Section~6 covers evaluation and
+deployment (test-time compute, quantization, mechanistic analysis, and
+a benchmark proposal). Section~7 concludes.
+
+A note on honesty: with the exception of the loop sweep in Section~3,
+the studies in this report are analytical, methodological, or position
+pieces. Proposed experiments are labelled as proposed; no results are
+claimed that were not measured. The status of each chapter:
+
+\begin{center}
+{\small
+\begin{tabular}{lp{4.0cm}}
+\toprule
+Section & Status \\
+\midrule
+3. Loop-depth sweep & Executed (single run; 95\% CIs in Section~3) \\
+4. MoE routing & Analytical \\
+5. Curriculum protocol & Proposed \\
+6. Test-time taxonomy & Position \\
+7. Quantization & Analytical \\
+8. Distillation protocol & Proposed \\
+9. Mechanistic probes & Proposed \\
+10. TinyLoop-Bench & Design proposal \\
+\bottomrule
+\end{tabular}}
+\end{center}
