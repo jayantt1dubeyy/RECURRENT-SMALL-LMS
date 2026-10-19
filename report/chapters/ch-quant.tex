@@ -1,0 +1,224 @@
+% Extracted from p07-quantization
+\subsection{Quantization Robustness of Small MoE Models}
+\label{ch-quant}
+
+\paragraph{Background}
+
+\paragraph{Uniform affine quantization}
+
+Post-training quantization typically maps each weight $x$ to a $b$-bit
+integer via an affine transform with scale $s$ and zero-point $z$:
+{\small
+\begin{equation}
+\begin{aligned}
+x_q &= \mathrm{clip}\!\left(\mathrm{round}\!\left(\frac{x}{s}\right) + z,
+\; 0, \; 2^b - 1\right), \\
+\hat{x} &= s\,(x_q - z),
+\end{aligned}
+\end{equation}}
+with $s = (\max x - \min x)/(2^b - 1)$ over a calibration range. For
+weights roughly uniform within the range, the mean squared
+reconstruction error is approximately $s^2/12$---quadratic in the
+range. Two consequences follow that matter below: error grows with the
+weight range, and per-group scales (small $s$ per group) beat
+per-tensor scales whenever ranges vary across groups. GPTQ
+\citep{frantar2023gptq} improves on round-to-nearest by correcting each
+quantized weight against the inverse Hessian of the layer's inputs;
+LLM.int8() \citep{dettmers2022llm} isolates outlier feature dimensions
+in higher precision; SmoothQuant \citep{xiao2023smoothquant} migrates
+quantization difficulty from activations to weights. All three were
+developed on dense models at billion-plus scale.
+
+\paragraph{Sparse mixture-of-experts}
+
+In a sparse MoE layer, each token's hidden state $h$ is routed by a
+small linear map to logits $r = W_r h$ over $E$ experts; a top-$k$
+operation selects the experts that process the token, and their outputs
+are combined by softmax weights \citep{shazeer2017moe}. Only $k \ll E$
+experts activate per token, so capacity scales with $E$ while compute
+scales with $k$. The router $W_r$ is tiny---in our reference model,
+$d_{\text{model}} = 512$ and $E = 8$ give $512 \times 8 = 4{,}096$
+parameters---but it controls the fate of millions of expert parameters.
+
+\paragraph{Reference model}
+
+Our running example is a 44M-parameter recurrent MoE transformer:
+43,974,722 parameters total, hidden dimension 512, 6 prelude and 2 coda
+layers, 4 recurrent loops, 8 experts per MoE layer, grouped-query
+attention \citep{ainslie2023gqa}, GPT-2 BPE vocabulary of 50,257,
+trained on TinyStories \citep{eldan2023tinystories} for 120M tokens
+(loss 9.5242 $\rightarrow$ 1.5263). We also compute footprints for the
+133M (133,334,082 parameters) and 500M (507,581,506 parameters)
+configurations in the same family.
+
+\paragraph{Why MoE quantizes differently}
+
+\paragraph{Per-expert calibration skew}
+
+In a dense layer, every weight serves every token, so calibration data
+is the full distribution. In MoE, expert $e$ is calibrated only on the
+tokens routed to it. Routing is deliberately skewed---load-balancing is
+approximate, and some experts inevitably specialise narrowly---so
+experts see different token counts, different activation statistics,
+and different effective weight ranges. Since quantization error scales
+with $s^2$ and $s$ with the range, rarely-fired experts calibrated on
+thin data carry noisier scales and larger reconstruction error:
+\begin{equation}
+\mathcal{E}_e = \frac{\|W_e - \hat{W}_e\|_F^2}{\|W_e\|_F^2}
+\end{equation}
+should vary systematically with expert utilisation, not randomly. The
+prediction: per-expert relative error anti-correlates with expert
+firing frequency. A dense model has no such structure; its error is
+approximately uniform across the layer.
+
+\paragraph{Router precision and the top-$k$ discontinuity}
+\label{sec:router-disc}
+
+The router is 4,096 parameters out of 44 million---under 0.01\%---and
+it is the worst place in the model to quantize aggressively. The reason
+is the top-$k$ operator: it is discontinuous. A perturbation
+$\delta$ in router logits that merely rescales softmax probabilities
+in a dense model can \emph{flip} expert selection here, rerouting the
+token to an entirely different expert and changing the output by
+$O(1)$, not $O(\delta)$. Formally, where the dense sensitivity is
+Lipschitz in the weights, the MoE sensitivity has jump
+discontinuities at every logit tie. The practical prescription is
+mixed precision by construction: keep the router (and its input
+normalisation) at 16 bits regardless of what happens elsewhere. The
+cost is negligible---8\,KB---and the protection is structural.
+
+\paragraph{The embedding table dominates}
+
+This is the single most important quantitative fact about quantizing
+small language models, MoE or otherwise. The embedding table has
+$50{,}257 \times 512 = 25{,}731{,}584$ parameters: \textbf{58.5\% of
+the entire 44M model}. More than half the weights are a lookup table.
+Embedding quantization behaves differently from matmul quantization:
+there is no accumulation of products, only selection, so the error
+model is per-row rather than per-multiply---but the rows for rare
+tokens are updated rarely during training and may carry noisier values,
+mirroring the expert-skew argument. The standard practice of keeping
+embeddings at higher precision is well motivated here twice over:
+they are most of the model, and their rows are unevenly trained.
+
+\paragraph{Shared dense versus expert parameters}
+
+The prelude and coda layers are dense and shared across all tokens;
+their quantization error is the familiar uniform kind. The MoE layers
+hold most non-embedding parameters and carry the structured
+sensitivities above. A sound quantization scheme therefore treats
+three parameter classes differently---dense trunk, experts, router---not
+one.
+
+\paragraph{Memory arithmetic at three scales}
+
+Weight memory in megabytes (decimal) for the three configurations:
+
+\begin{center}
+{\footnotesize\setlength{\tabcolsep}{3pt}
+\begin{tabular}{lrrrr}
+\toprule
+Model & FP32 & FP16 & INT8 & INT4 \\
+\midrule
+44M & 175.9 & 88.0 & 44.0 & 22.0 \\
+133M & 533.3 & 266.7 & 133.3 & 66.7 \\
+500M & 2030.3 & 1015.2 & 507.6 & 253.8 \\
+\bottomrule
+\end{tabular}}
+\end{center}
+Sizes in MB. The 44M reference model has 43,974,722 parameters.
+
+These are exact multiplications of the parameter counts; they exclude
+scale-factor overhead, which for per-group INT4 (group size 128, FP16
+scales) adds roughly $P/128 \times 2$ bytes---about 0.3\,MB at 44M,
+negligible.
+
+\paragraph{A concrete mixed-precision proposal.} Keep the embedding
+table (25.7M params) and router at FP16; quantize everything else to
+INT4:
+{\small
+\begin{equation}
+\begin{aligned}
+&\underbrace{25.7\text{M} \times 2\,\text{B}}_{51.5\,\text{MB}}
+\;+\;
+\underbrace{18.2\text{M} \times 0.5\,\text{B}}_{9.1\,\text{MB}} \\
+&\qquad\approx\; 60.6\,\text{MB},
+\end{aligned}
+\end{equation}}
+versus 88.0\,MB for uniform FP16---a 31\% saving that spends precision
+exactly where the router-discontinuity argument
+argued above says it matters. Whether the INT4
+experts hold up is precisely what the protocol below is designed to
+test.
+
+A note on the KV cache: grouped-query attention already compresses it,
+and cache quantization is orthogonal to weight quantization---we scope
+this paper to weights.
+
+\paragraph{Proposed evaluation protocol}
+
+We propose the following measurements, none yet performed. For each
+precision setting (FP16 baseline, INT8 uniform, INT4 uniform, and the
+mixed-precision scheme above):
+
+\begin{enumerate}
+\item \textbf{Held-out perplexity} on a fixed TinyStories validation
+split, reported per checkpoint-equivalent (post-training quantization
+needs no retraining, so this is one number per setting).
+\item \textbf{Per-expert relative error} $\mathcal{E}_e$ as defined
+above, correlated against expert firing frequency measured on
+the validation set. Hypothesis: strong negative correlation.
+\item \textbf{Router flip rate:} the fraction of validation tokens
+whose top-$k$ expert set changes between FP16 and quantized router,
+\begin{equation}
+F = \frac{1}{T}\sum_{t=1}^{T}
+\mathbf{1}\{\mathrm{topk}(\tilde{r}_t) \neq \mathrm{topk}(r_t)\}.
+\end{equation}
+Hypothesis: $F$ stays near zero when the router is held at FP16 and
+jumps discontinuously when it is quantized---the signature of the
+router-discontinuity argument developed in Section~\ref{ch:arch}.
+\item \textbf{Generation spot checks:} fixed prompts completed at each
+precision, judged for coherence degradation. Catches failures that
+perplexity averages hide.
+\end{enumerate}
+
+The protocol is designed so that a null result is informative: if
+per-expert error shows no correlation with utilisation, the
+calibration-skew argument is wrong, and uniform quantization is safer
+for MoE than we claim.
+
+\paragraph{Discussion}
+
+The small-MoE case is the interesting one. In a trillion-parameter MoE,
+experts are redundant---losing one to quantization noise is absorbed by
+the others. At 44M with 8 experts, every expert is load-bearing; there
+is no redundancy to hide behind. This inverts the usual intuition that
+small models are easier to quantize: the \emph{weights} are fewer, but
+the \emph{structure} is more fragile. The embedding dominance compounds
+this: most of what you are quantizing is a lookup table, not compute.
+
+The broader lesson is that quantization schemes should be
+architecture-aware. Per-tensor INT8 treats a router logit and an expert
+weight as the same kind of number; they are not.
+
+\paragraph{Limitations}
+
+This paper is analytical: no quantization experiment has been run, and
+every sensitivity claim is a prediction, not a measurement. The memory
+numbers are exact arithmetic, but real deployments add runtime,
+activation, and cache overheads we do not model. Our expert-skew
+argument assumes imperfect load balancing, which holds in practice but
+is a property of training, not of the architecture. Finally, we scope
+to weight quantization; activation and KV-cache quantization at small
+scale deserve their own analysis.
+
+\paragraph{Conclusion}
+
+Small sparse-MoE models have a quantization profile distinct from dense
+models: skewed per-expert calibration, a discontinuous router that
+demands high precision despite its size, and an embedding table that is
+most of the model. We derived these sensitivities, computed exact
+memory footprints from 22\,MB to 2\,GB across three scales, proposed a
+mixed-precision scheme at 60.6\,MB for the 44M model, and specified a
+protocol---including a router flip-rate metric---that can confirm or
+refute the analysis. The measurements are the obvious next step.
