@@ -1,0 +1,166 @@
+% Extracted from p10-benchmark
+\subsection{TinyLoop-Bench: A Benchmark Proposal}
+\label{ch-bench}
+
+\paragraph{Introduction}
+
+Benchmarks shape fields. GLUE told us what ``understanding'' meant for
+an era; perplexity leaderboards told us what fluency meant. For
+recurrent language models there is no equivalent instrument. A
+researcher who trains a looped transformer today reports the numbers
+available---perplexity at the trained loop count---and the
+loop-specific questions go unanswered: does quality improve
+monotonically with loops? Where does it saturate? How does a 44M
+recurrent model compare, per parameter, against a 44M fixed-depth
+model?
+
+A companion study in this series ran exactly one such evaluation: a
+test-time loop sweep on a 44M OpenMythos model (43,974,722 parameters;
+dim 512; 6 prelude + 2 coda layers; 4 loops; 8 experts; GQA; GPT-2
+BPE 50,257; TinyStories, 120M tokens, loss 9.5242$\rightarrow$1.5263),
+measuring perplexity at 1, 2, 4, 8, 12, and 16 loops. The result---a
+sharp drop to 4.41 at the trained depth, then a flat plateau---was
+obtained with ad-hoc scripts. TinyLoop-Bench exists to make that
+evaluation standard, repeatable, and comparable across models.
+
+\paragraph{Design Principles}
+
+\begin{enumerate}
+\item \textbf{Loops are first-class.} Every metric is reported as a
+function of loop count, not just at the trained depth. A model card
+without a loop-scaling curve is incomplete.
+\item \textbf{Cheap to run.} Sub-1B models exist so that iteration is
+fast; the suite must run on a single consumer GPU in under an hour.
+No task may require more than 512 evaluation sequences.
+\item \textbf{Proposed, versioned, frozen.} The suite ships with a
+version number and frozen evaluation scripts; results cite the
+version. This paper specifies v0.1.
+\item \textbf{Honest about construct validity.} TinyStories-scale
+data \citep{eldan2023tinystories} measures fluency and basic
+coherence, not reasoning. The suite claims nothing beyond its
+constructs.
+\end{enumerate}
+
+\paragraph{Task Categories}
+
+\paragraph{C1: Fluency.} Standard language modelling on held-out
+TinyStories sequences (256 sequences $\times$ 256 tokens, fixed
+split, seed-pinned). Metric: perplexity at each loop count
+$n \in \{1, 2, 4, 8, 12, 16\}$. This is the baseline everything else
+builds on.
+
+\paragraph{C2: Coherence over long generations.} The model generates
+continuations of 256 tokens from 64 fixed prompts. Two proposed
+metrics:
+\begin{itemize}
+\item \emph{Entity consistency}: named entities introduced in the
+prompt are extracted (by a fixed, open NER pass---proposed
+implementation: spaCy \texttt{en\_core\_web\_sm}, pinned version);
+the score is the fraction still referenced consistently (no
+contradictory attributes) in the continuation. Reported per loop
+count.
+\item \emph{Repetition rate}: fraction of generated 8-grams that
+repeat a previous 8-gram within the continuation. Lower is better;
+reported per loop count.
+\end{itemize}
+Both are heuristic proxies, documented as such; the suite reports
+them alongside, never instead of, human-readable samples (5 fixed
+prompts, outputs published verbatim in the report).
+
+\paragraph{C3: Loop-scaling curves.} The signature category. For each
+model, the suite records the full perplexity-vs-loops curve and
+derives three summary statistics (definitions proposed here):
+\begin{itemize}
+\item \emph{Refinement gain} $G = \mathrm{PPL}(1)/\mathrm{PPL}(K_{\mathrm{train}})$:
+how much iteration helps at all.
+\item \emph{Saturation point} $n^*$: the smallest $n$ with
+$\mathrm{PPL}(n) \leq 1.02 \times \min_m \mathrm{PPL}(m)$---where
+gains effectively stop.
+\item \emph{Extrapolation slope} $E = \mathrm{PPL}(2K_{\mathrm{train}})
+- \min_m \mathrm{PPL}(m)$: positive means over-looping hurts, near
+zero means it plateaus, negative means genuine extrapolation.
+\end{itemize}
+For the companion 44M model these would read (illustrative, from the
+companion study's real numbers): $G = 29.38/4.41 \approx 6.7$,
+$n^* = 4$, $E = 4.90 - 4.41 = +0.49$---refinement helps enormously,
+saturates exactly at the trained depth, and extrapolation slightly
+hurts. The suite's job is to make triples like $(6.7, 4, +0.49)$
+the standard way recurrent models are compared.
+
+\paragraph{C4: Parameter-efficiency frontiers.} Each submitted model is
+plotted against fixed-depth baselines at matched parameter counts on
+the C1--C3 metrics: quality per parameter. The suite ships reference
+baselines (proposed: 44M and 130M fixed-depth transformers trained on
+the same TinyStories split with the same token budget---to be trained
+when the suite is built). A recurrent model ``wins'' its frontier if
+it dominates the baseline curve at equal or fewer parameters.
+
+\paragraph{Reference Evaluation Protocol}
+
+\paragraph{Environment.} Single GPU, fp16 or bf16, batch size chosen
+to fit 12\,GB VRAM; the harness auto-selects. All randomness seeded;
+seeds published.
+
+\paragraph{Procedure.} (1) Load checkpoint and config; the harness
+reads the trained loop count $K_{\mathrm{train}}$ from config.
+(2) Run C1 at $n \in \{1,2,4,8,12,16\}$ (capped at $4K_{\mathrm{train}}$
+if larger). (3) Run C2 generations at $n \in \{1, K_{\mathrm{train}},
+2K_{\mathrm{train}}\}$. (4) Compute C3 statistics from the C1 curve.
+(5) Emit a JSON report plus a human-readable model card following the
+fixed template (see below).
+
+\paragraph{Reporting template.} Every submission reports: model
+identifier, parameter count, architecture summary (dim, layers,
+loops, experts, attention type, vocabulary), training tokens and
+dataset, the full C1 table, the $(G, n^*, E)$ triple, C2 scores,
+C4 frontier position, suite version, and the five verbatim
+generations. No cherry-picking: the harness generates the card, not
+the author.
+
+\paragraph{Harness Design (Proposed)}
+
+A single Python package, \texttt{tinyloop-bench}, with three parts:
+\emph{tasks} (dataset loaders, generation loop, metric functions),
+\emph{runners} (a model interface requiring only
+\texttt{generate(prompt, n\_loops)} and \texttt{perplexity(text,
+n\_loops)}), and \emph{reports} (JSON + Markdown card). The model
+interface is deliberately minimal so that any recurrent
+implementation---OpenMythos-style \citep{gomez2024openmythos} or
+otherwise---can plug in. Reference datasets are content-addressed by
+SHA-256; the exact TinyStories split and prompts ship with the
+package.
+
+\paragraph{Discussion}
+
+The most likely objection is scope: TinyStories is toy data, and a
+benchmark built on it cannot speak to reasoning or knowledge. We
+accept this and bound the claims accordingly---but note that the
+loop-scaling question is \emph{cleanest} at small scale, where full
+sweeps are cheap and confounders are few. A suite that standardises
+$(G, n^*, E)$ at 44M creates the vocabulary in which larger-scale
+recurrent evaluation can later be discussed.
+
+A second risk is Goodhart drift: once $(G, n^*, E)$ becomes a target,
+architectures may optimise the triple rather than genuine refinement
+(e.g.\ by making loop 1 artificially bad to inflate $G$). The
+verbatim generations and the C4 frontier are partial mitigations;
+ultimately, versioned frozen tasks plus community scrutiny are the
+defence, as with every benchmark.
+
+\paragraph{Limitations}
+
+This paper specifies a benchmark; it does not build or run one. The
+metric definitions (entity consistency, $G$, $n^*$, $E$) are
+proposals awaiting validation---in particular, whether entity
+consistency as defined correlates with human judgements of coherence
+is untested. Reference baselines do not yet exist. The suite covers
+only decoder-only recurrent transformers on English story data in
+v0.1.
+
+\paragraph{Conclusion}
+
+Recurrent models need recurrent benchmarks. TinyLoop-Bench v0.1
+specifies four task categories, concrete metrics including the
+loop-scaling triple $(G, n^*, E)$, a frozen evaluation protocol, and
+a harness design---everything needed to build it. The next step is
+building it.
