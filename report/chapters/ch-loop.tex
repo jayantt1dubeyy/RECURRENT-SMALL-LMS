@@ -1,0 +1,102 @@
+%% Centerpiece chapter, adapted from p01-loop-extrapolation
+\subsection{The Loop-Depth Sweep}
+\label{sec:loopsweep}
+
+\subsubsection{Method}
+
+\paragraph{Evaluation protocol.}  After training, we freeze the weights
+and evaluate with loop counts $n \in \{1, 2, 4, 8, 12, 16\}$ on 256
+fresh TinyStories sequences of length 256. For each $n$ we record mean
+cross-entropy loss and perplexity, and generate continuations from a
+fixed prompt for qualitative comparison. Sampling uncertainty is
+quantified with bootstrap 95\% confidence intervals (10,000 percentile
+resamples over the 256 sequences); all paired comparisons below use
+per-sequence paired resampling. The $n=4$ setting matches
+training; all others are pure test-time extrapolation or reduction.
+
+\subsubsection{Results}
+
+Table~\ref{tab:sweep} reports the sweep. Three regimes are visible.
+
+\begin{table*}[t]
+\centering
+{\footnotesize\setlength{\tabcolsep}{6pt}
+\begin{tabular}{lcccccc}
+\toprule
+Loops $n$ & 1 & 2 & 4 (trained) & 8 & 12 & 16 \\
+\midrule
+Loss & 3.380 & 2.414 & \textbf{1.484} & 1.590 & 1.591 & 1.591 \\
+\phantom{Loss} 95\% CI & [3.343, 3.419] & [2.384, 2.446] & \textbf{[1.454, 1.516]} & [1.559, 1.622] & [1.560, 1.624] & [1.560, 1.623] \\
+Perplexity & 29.38 & 11.18 & \textbf{4.41} & 4.90 & 4.91 & 4.91 \\
+\phantom{Perplexity} 95\% CI & [28.30, 30.52] & [10.84, 11.54] & \textbf{[4.28, 4.55]} & [4.75, 5.06] & [4.76, 5.07] & [4.76, 5.07] \\
+\bottomrule
+\end{tabular}}
+\caption{Test-time loop sweep: mean loss and perplexity on 256 held-out
+TinyStories sequences (length 256). 95\% confidence intervals are
+bootstrap percentile intervals (10,000 resamples over the 256 sequences).
+Bold marks the training depth.}
+\label{tab:sweep}
+\end{table*}
+
+\paragraph{Recurrence helps up to the trained depth.} Cutting loops
+below training is catastrophic for quality: a single loop yields
+perplexity 29.38, and doubling to 2 loops more than halves it to 11.18.
+The trained depth of 4 reaches 4.41. The recurrent iterations are doing
+substantial, non-redundant work.
+
+\paragraph{Extrapolation yields no gain.} Running 8 loops---twice the
+training count---\emph{hurts} slightly (4.41 $\rightarrow$ 4.90), and
+further loops to 12 and 16 change nothing (4.91, 4.91). The dynamics do
+not continue to refine; they appear to converge to a fixed point near,
+but slightly worse than, the trained-depth output. The degradation is
+not sampling noise: the 95\% bootstrap intervals on the two means do not
+overlap ([4.28, 4.55] at 4 loops vs.\ [4.75, 5.06] at 8 loops), and the
+paired per-sequence difference is $+0.106$ loss with interval
+$[+0.101, +0.110]$. The 8-to-12 difference, by contrast, is $+0.001$
+loss---negligible in magnitude---confirming a genuine
+plateau rather than continued drift.
+
+\paragraph{Generations stay coherent.} Qualitatively, samples at all
+loop counts are grammatical story continuations; over-looping does not
+cause collapse or repetition. The degradation is in token-level
+likelihood, not in catastrophic failure modes.
+
+\subsubsection{Discussion}
+
+Our central finding is that the recurrent dynamics are \emph{calibrated}
+to the training iteration count. This is consistent with the model
+learning an approximate fixed-point iteration whose contraction
+properties hold for the trained horizon: within it, each loop refines;
+beyond it, the iteration has converged and additional steps add only
+noise.
+
+This cautions against treating loop count as a free test-time scaling
+knob. If extrapolation is desired, it likely requires training-time
+support---e.g., randomized loop counts per batch, or an explicit
+halting objective---rather than emerging by default. Notably, our
+results do not contradict the broader test-time scaling literature:
+sampling-based methods \citep{snell2024scaling} scale a different axis
+(number of attempts) than recurrent refinement (depth of a single
+attempt).
+
+A limitation is scale: our study uses one 44M model on one dataset.
+Within that scope, sampling uncertainty is now quantified---the key
+4-to-8-loop degradation survives a paired bootstrap test---but
+across-run uncertainty (different seeds, different data orderings)
+remains unmeasured and is the natural next experiment.
+Whether larger recurrent models, or training with loop-count
+randomization, recover extrapolation is left to future work. A second
+limitation is metric scope: perplexity may miss qualitative gains from
+extra loops on harder reasoning tasks, which TinyStories does not
+exercise.
+
+\subsubsection{Conclusion}
+
+On a 44M recurrent transformer trained at 4 loops, test-time loop
+extrapolation does not deliver free gains: quality saturates at the
+training depth and slightly degrades beyond it (4.41 $\rightarrow$
+4.90 perplexity at 8 loops) before plateauing.
+Recurrence is powerful within its trained horizon and yields nothing
+further outside it.
+We release our evaluation protocol to enable comparable sweeps at
+larger scales.
