@@ -1,0 +1,29 @@
+The throughline of this report is a single, stubborn empirical fact:
+on the reference 44M model, recurrence helps enormously within its
+trained horizon and not at all outside it. Everything else here is an
+attempt to understand, exploit, or work around that fact.
+
+The architecture chapters show \emph{why} the model looks the way it
+does: sparse routing concentrates learning signal per expert and
+demands careful load balancing at small batch sizes; grouped-query
+attention is a serving-time optimization whose training-time footprint
+is negligible at this scale; and the looped structure converts
+parameters into effective depth at the cost of gradient-conditioning
+constraints that favour small, near-isometric recurrent blocks.
+
+The training chapters propose how to do better next time: curricula
+that order TinyStories by measurable complexity, and distillation
+protocols that supervise the recurrent dynamics themselves rather than
+only their final outputs. The evaluation chapters map the territory
+around the model: which test-time scaling axes are viable below a
+billion parameters, how quantization interacts with sparsity, what the
+loops might mechanistically be computing, and how the field should
+benchmark recurrent small models at all.
+
+The most important next step is the one the centerpiece demands:
+training with randomized loop counts to test whether extrapolation can
+be \emph{taught} rather than hoped for---no experiment in this report
+tests that yet. Until then, the honest summary of this programme is
+that test-time loop scaling, on the evidence of one 44M run, offers no
+free gains beyond the trained depth---and establishing that is itself
+progress.
