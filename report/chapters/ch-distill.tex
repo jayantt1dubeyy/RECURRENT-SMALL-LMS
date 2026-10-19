@@ -1,0 +1,172 @@
+% Extracted from p08-distillation
+\subsection{Distilling into Recurrent Students}
+\label{ch-distill}
+
+\paragraph{Background}
+
+\paragraph{Knowledge distillation.} \citet{hinton2015distilling}
+introduced training a student on the teacher's softened output
+distribution, transferring ``dark knowledge'' about class similarities.
+\citet{sanh2019distilbert} extended this with hidden-state matching
+between aligned layers, producing a widely used compact BERT.
+
+\paragraph{Recurrent transformers.} The Universal Transformer
+\citep{dehghani2019universal} replaces fixed depth with a shared block
+applied recurrently. The OpenMythos variant frames the recurrent core
+with unshared prelude layers (input processing) and coda layers
+(output processing). Our reference student configuration, matching the
+44M model studied in a companion paper of this series, uses dimension
+512, 6 prelude plus 2 coda layers, 4 loops of a shared block, 8 experts
+per MoE layer, grouped-query attention, and a 50,257-token BPE
+vocabulary (43,974,722 parameters total), trained on TinyStories
+\citep{eldan2023tinystories}.
+
+\paragraph{The calibration problem.} In the companion study, the 44M
+model's test-time loop sweep showed perplexity 29.38 at 1 loop falling
+to 4.41 at the trained depth of 4 loops, then degrading slightly to
+4.90 at 8 loops and plateauing through 16 loops. The recurrent dynamics
+are calibrated to the training iteration count; extra test-time loops
+do not refine further. Any distillation protocol for recurrent students
+must reckon with this: supervision that fixes a single loop count
+risks baking in the same calibration.
+
+\paragraph{Why Naive Distillation Under-Constrains Recurrence}
+
+Consider a teacher $T$ with $L$ distinct layers and a student $S$ whose
+shared block $f_\theta$ is iterated $K$ times between prelude $P$ and
+coda $C$:
+\begin{equation}
+h_0 = P(x), \quad h_{k} = f_\theta(h_{k-1})\;\; (k=1\ldots K), \quad
+y = C(h_K).
+\end{equation}
+Naive distillation minimises a divergence $D(p_T(y\mid x)\,\|\,p_S(y\mid
+x))$ over the final outputs only. The difficulty is degrees of
+freedom: for fixed $P$, $C$, and output $y$, the intermediate sequence
+$(h_1, \ldots, h_{K-1})$ is unconstrained. In particular, the
+degenerate solution $f_\theta \approx \mathrm{identity}$ satisfies any
+output-matching objective while performing zero iterative refinement;
+all computation migrates to $P$ and $C$, which the optimiser prefers
+because they receive undiluted gradients. The student then matches the
+teacher's logits with a recurrent block that does nothing---and, per
+the calibration finding above, its loop count becomes a frozen
+hyperparameter rather than a meaningful compute knob.
+
+A second, subtler failure: even when $f_\theta$ is non-trivial, nothing
+in the objective requires successive iterations to implement
+\emph{progressive} refinement. The block may learn oscillatory or
+redundant dynamics that happen to land near the teacher's output at
+exactly step $K$. Attention-map inspection in such students (proposed
+in \S\ref{sec:experiments}) would be expected to show near-identical
+patterns across loops, in contrast to a teacher whose layer-wise
+attention evolves from local to global structure.
+
+\paragraph{Loop-Aware Distillation Protocol}
+
+We propose supervising the \emph{trajectory}, not just the endpoint.
+
+\paragraph{Layer-to-loop alignment.} Partition the teacher's $L$
+layers into $K$ contiguous groups $G_1, \ldots, G_K$. For loop $k$,
+define the target representation as the teacher's output after group
+$G_k$:
+\begin{equation}
+\mathcal{L}_{\mathrm{hid}} = \sum_{k=1}^{K} \lambda_k \,
+\big\lVert h_k - \phi_k\big(T_{G_k}(x)\big) \big\rVert^2,
+\end{equation}
+where $T_{G_k}(x)$ is the teacher hidden state after group $k$ and
+$\phi_k$ is a learned linear projection bridging dimensionality gaps.
+The weights $\lambda_k$ follow a ramp $\lambda_k \propto k/K$,
+encoding the prior that later iterations should carry more of the
+teacher's high-level computation.
+
+\paragraph{Cross-iteration attention transfer.} For each loop $k$ and
+each attention head, we match the student's attention distribution to
+the mean attention map of teacher group $G_k$ via KL divergence:
+\begin{equation}
+\mathcal{L}_{\mathrm{attn}} = \sum_{k=1}^{K} \mu_k \,
+\mathrm{KL}\big(\bar{A}^{T}_{G_k} \,\|\, A^{S}_{k}\big).
+\end{equation}
+This directly pressures the recurrent block to reproduce the
+teacher's layer-wise attention evolution---from local patterns early
+to long-range structure late---rather than collapsing to static maps.
+
+\paragraph{Loop-count curriculum.} To avoid calibrating the dynamics to
+a single $K$, training randomises the executed loop count per batch,
+$K \sim \mathcal{U}\{1, K_{\max}\}$, with the alignment targets
+recomputed for the sampled depth (teacher groups re-partitioned
+accordingly). Early training uses small $K_{\max}$, growing to the
+full depth---a curriculum over iteration count. Final-logit matching
+against the teacher is retained throughout:
+\begin{equation}
+\mathcal{L} = \alpha \mathcal{L}_{\mathrm{task}}
++ \beta \mathcal{L}_{\mathrm{logit}}
++ \gamma \mathcal{L}_{\mathrm{hid}}
++ \delta \mathcal{L}_{\mathrm{attn}},
+\end{equation}
+with $\gamma, \delta$ warmed up from zero once the student matches the
+teacher's outputs coarsely (we propose $\alpha{=}1, \beta{=}1$,
+$\gamma, \delta$ ramping to $0.5$).
+
+\paragraph{Proposed Experiments}
+\label{sec:experiments}
+
+\paragraph{Setup.} Teacher: a standard 12-layer transformer
+($\approx$120M parameters, proposed configuration) trained on
+TinyStories \citep{eldan2023tinystories}. Student: the 44M recurrent
+configuration above ($K_{\max}{=}4$). All runs proposed; no results
+are claimed.
+
+\paragraph{Experiment 1: ablation of supervision terms.} Train four
+students: (a) naive ($\beta$ only); (b) +$\mathcal{L}_{\mathrm{hid}}$;
+(c) +$\mathcal{L}_{\mathrm{attn}}$; (d) full protocol. Report
+perplexity at each loop count $1\ldots8$ and the loop-sweep curve
+shape. \emph{Predicted} outcome: (a) matches teacher perplexity at
+exactly 4 loops but shows flat or degraded behaviour off the trained
+depth with static cross-loop attention; (d) shows monotonic
+improvement with loop count and evolving attention maps. These are
+hypotheses to be tested, not findings.
+
+\paragraph{Experiment 2: iteration-content probes.} For each student,
+train linear probes on $h_k$ to predict the next token, and measure
+per-loop probe accuracy. A student doing genuine iterative refinement
+should show rising probe accuracy across $k$; a degenerate student
+will show flat probe curves with all gains in the coda.
+
+\paragraph{Experiment 3: loop-count generalisation.} Evaluate each
+student at $K \in \{1, 2, 4, 8, 12, 16\}$. The curriculum-trained
+student is hypothesised to degrade gracefully rather than exhibiting
+the sharp calibration seen in fixed-$K$ training.
+
+\paragraph{Discussion}
+
+If the protocol works, it yields a genuinely new capability: small
+recurrent students that inherit a large teacher's knowledge
+\emph{and} implement it as iterative refinement, with loop count as a
+working test-time knob. If per-loop supervision proves unnecessary---if
+naive distillation already produces refining dynamics---that is itself
+an informative negative result about how much structure output
+matching imposes.
+
+A limitation is teacher choice: distilling from a fixed-depth teacher
+may transfer depth-shaped computation that recurrence can only
+approximate. An alternative worth testing is a recurrent teacher,
+which would make the alignment exact but sacrifices the abundance of
+strong pretrained fixed-depth teachers.
+
+\paragraph{Limitations}
+
+This is a method proposal without empirical validation. The predicted
+outcomes in \S\ref{sec:experiments} are hypotheses. Scale is limited
+to the sub-100M regime and TinyStories; whether loop-aware
+distillation helps at larger scales or on reasoning-heavy data is
+open. The alignment between teacher layer groups and student loops is
+a heuristic---there may be no faithful mapping, in which case the
+per-loop targets could harm more than help.
+
+\paragraph{Conclusion}
+
+Distilling into recurrent students requires supervising the
+trajectory, not just the endpoint. We have specified a loop-aware
+protocol---per-loop hidden targets, cross-iteration attention
+transfer, and a loop-count curriculum---together with the experiments
+that would test it. The question it answers is precise: can
+distillation produce recurrent students whose loops do real work?
