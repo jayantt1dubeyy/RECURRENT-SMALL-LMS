@@ -1,0 +1,28 @@
+All studies in this report refer to a single reference configuration.
+It is described here once; later chapters cite this chapter rather than
+restating it.
+
+\paragraph{Architecture.} The model follows the OpenMythos design
+\citep{gomez2024openmythos}: 43,974,722 parameters, model dimension 512,
+6 unshared prelude layers and 2 unshared coda layers framing a shared
+recurrent block executed for 4 loops, 8 experts per mixture-of-experts
+feedforward layer, grouped-query attention, and a GPT-2 byte-pair
+vocabulary of 50,257 tokens. The prelude/coda structure is a descendant
+of the Universal Transformer \citep{dehghani2019universal} family, with
+parameter sharing in the spirit of ALBERT \citep{lan2020albert}.
+Adaptive-depth variants allocate iteration per token rather than fixing
+it globally \citep{elbayad2020depth,raposo2024mixture}; the reference
+model here fixes the loop count at training time, which is what makes
+the test-time extrapolation question sharp.
+
+\paragraph{Training.} The reference run trains on TinyStories
+\citep{eldan2023tinystories} for 4,850 steps (120,004,608 tokens,
+approximately 152 minutes on a single Kaggle T4 GPU in fp16). Training
+loss falls from 9.5242 to 1.5263. Qualitative inspection shows a clear
+progression from incoherent output early in training to fluent
+multi-sentence stories by the end.
+
+\paragraph{Attribution.} The OpenMythos architecture is due to Gomez
+\citep{gomez2024openmythos} (GitHub repository, 2024). The 44M training
+run, the loop-depth sweep, and all analyses in this report are the
+author's own work; no released checkpoints are used.
